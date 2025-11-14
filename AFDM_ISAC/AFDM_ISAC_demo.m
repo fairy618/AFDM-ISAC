@@ -34,7 +34,7 @@ s_tx     = cpp_add(s_blocks, Ncp);      % (N+Ncp)*Nsym x 1
 
 %% ===================== 目标真值（请确保 max(li)<Ncp） =====================
 R_true = [400, 320, 180];               % m
-v_true = [ 25,  10, -10];               % m/s
+v_true = [ 50,  10, -10];               % m/s
 P = numel(R_true);
 
 tau = 2*R_true / c_light;               % s
@@ -56,6 +56,34 @@ Hhat = Y_daft ./ (X + 1e-12);                     % 粗糙 LS，默认通信信�
 Xhat = Y_daft ./ (Hhat + 1e-12);
 plot_constellation(X(:), Xhat(:), M);
 
+%% ===================== 通信误差统计 =====================
+% 将估计符号映射回星座
+symHat = qamdemod(Xhat(:), M, 'UnitAveragePower', true);
+
+% 真实符号
+symTrue = qamdemod(X(:), M, 'UnitAveragePower', true);
+
+% 计算符号错误数
+symErr = sum(symHat ~= symTrue);
+SER = symErr / numel(symTrue);
+
+% 如果你想统计比特错误：
+bitsTrue = de2bi(symTrue, log2(M), 'left-msb');
+bitsHat  = de2bi(symHat , log2(M), 'left-msb');
+bitErr = sum(bitsTrue(:) ~= bitsHat(:));
+BER = bitErr / numel(bitsTrue);
+
+% ====== 打印 ======
+fprintf('================ 通信误差统计 ================\n');
+fprintf('符号总数    : %d\n', numel(symTrue));
+fprintf('符号错误数  : %d\n', symErr);
+fprintf('SER         : %.4e\n', SER);
+fprintf('比特总数    : %d\n', numel(bitsTrue));
+fprintf('比特错误数  : %d\n', bitErr);
+fprintf('BER         : %.4e\n', BER);
+fprintf('=================================================\n\n');
+
+
 %% ===================== 公共坐标换算（物理轴） =====================
 % 距离分辨率：ΔR = c/(2B) = c/(2*N*Δf) = c/(2*Fs)
 range_bin_m = c_light/(2*Fs);
@@ -68,6 +96,55 @@ vel_axis = fd_axis * (c_light/(2*fc));                         % m/s
 RD_fccr = abs( rdm_fccr(Y_blocks, s_blocks) );     % N x Nsym
 RD_show = fftshift(RD_fccr(1:Ncp, :), 2);          % 仅对 Doppler 维中心化
 ranges_plot = (0:Ncp-1) * range_bin_m;
+
+%% ===================== 雷达测量指标与误差统计 =====================
+% 从 RD_show 中估计目标（取每个目标真实附近的最大值）
+est_R = zeros(1,P);
+est_V = zeros(1,P);
+
+for p = 1:P
+    % 找到接近真实距离的 bin
+    [~, r_idx0] = min(abs(ranges_plot - R_true(p)));
+    % 找到接近真实速度的 bin
+    [~, v_idx0] = min(abs(vel_axis - v_true(p)));
+
+    % 提取邻域局部最大，用 5x5 邻域增强稳健性
+    r_rng = max(r_idx0-2,1) : min(r_idx0+2, length(ranges_plot));
+    v_rng = max(v_idx0-2,1) : min(v_idx0+2, length(vel_axis));
+
+    local_patch = RD_show(r_rng, v_rng);
+    [maxVal, idx] = max(local_patch(:));
+    [rr, vv] = ind2sub(size(local_patch), idx);
+
+    est_R(p) = ranges_plot(r_rng(rr));
+    est_V(p) = vel_axis(v_rng(vv));
+end
+
+% 误差
+range_err = est_R - R_true;
+vel_err = est_V - v_true;
+
+fprintf('================ 雷达测量指标 =================\n');
+for p = 1:P
+    fprintf('目标 %d:\n', p);
+    fprintf(' 真实距离        : %.3f m\n', R_true(p));
+    fprintf(' 测量距离        : %.3f m\n', est_R(p));
+    fprintf(' 距离误差        : %.3f m\n', range_err(p));
+    fprintf('---------------------------------------------\n');
+    fprintf(' 真实速度        : %.3f m/s\n', v_true(p));
+    fprintf(' 测量速度        : %.3f m/s\n', est_V(p));
+    fprintf(' 速度误差        : %.3f m/s\n', vel_err(p));
+    fprintf('---------------------------------------------\n');
+end
+
+% 给出整体误差统计
+fprintf('\n================ 误差统计汇总 ================\n');
+fprintf('距离 RMSE: %.3f m\n', sqrt(mean(range_err.^2)));
+fprintf('速度 RMSE: %.3f m/s\n', sqrt(mean(vel_err.^2)));
+fprintf('距离 MAE : %.3f m\n', mean(abs(range_err)));
+fprintf('速度 MAE : %.3f m/s\n', mean(abs(vel_err)));
+fprintf('=================================================\n\n');
+
 
 % 2D RDM
 figure('Name','RDM (Time-Domain FCCR)','Color','w');
@@ -117,7 +194,7 @@ end
 
 function Y = daft_colwise(S, c1, c2)
 % 逐列 DAFT（IDAFT 的逆）
-[N, K] = size(S);
+[N, ~] = size(S);
 n  = (0:N-1).'; m  = (0:N-1).';
 E1 = exp(-1j*2*pi*c1*(n.^2));
 E2 = exp(-1j*2*pi*c2*(m.^2));

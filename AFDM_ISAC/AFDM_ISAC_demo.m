@@ -30,7 +30,7 @@ xTx = qammod(symIdx, M, 'UnitAveragePower', true);
 X   = reshape(xTx, [N, Nsym]);          % DAFT 域符号
 
 s_blocks = afdm_mod(X, c1, c2);         % N x Nsym（时域）
-s_tx     = cpp_add(s_blocks, Ncp);      % (N+Ncp)*Nsym x 1
+s_tx     = cpp_add(s_blocks, Ncp, c1);      % (N+Ncp)*Nsym x 1
 
 %% ===================== 目标真值（请确保 max(li)<Ncp） =====================
 R_true = [400, 320, 180];               % m
@@ -201,15 +201,34 @@ E2 = exp(-1j*2*pi*c2*(m.^2));
 Y  = (fft(E1 .* S, [], 1) / sqrt(N)) .* E2;
 end
 
-function s_tx = cpp_add(s_blocks, Ncp)
-% CPP 添加：每块头部拼接 Ncp 个尾样点
+function s_tx = cpp_add(s_blocks, Ncp, c1)
+% CPP 添加（正确版）：每块头部拼接 Ncp 个带 chirp 相位的尾样点
+% s_blocks: N x K (每列一个长度为N的时域块)
+% Ncp: 前缀长度（样点数）
+% c1: DAFT/AFDM 中的 chirp 参数（实数）
+%
+% 依据关系： s[n] = s[N+n] * exp(-1j*2*pi*c1*(N^2 + 2*N*n)), n = -Ncp..-1
+
 [N, K] = size(s_blocks);
+
+% 预分配为复数
 out = zeros(N+Ncp, K);
+out = complex(out);
+
+% 计算 n 的向量（对应前缀位置）
+n_vec = (-Ncp : -1).'; % 列向量，长度 Ncp
+
+% 对每一列块处理
 for k = 1:K
-    blk = s_blocks(:,k);
-    out(:,k) = [blk(end-Ncp+1:end); blk];
+    blk = s_blocks(:,k);         % N x 1
+    tail = blk(N-Ncp+1 : N);     % Ncp x 1, 原始尾部样点 (对应 s[N+n])
+    % 计算相位因子（Ncp x 1）
+    phase = exp(-1j*2*pi*c1*(N^2 + 2*N*n_vec));
+    prefix = tail .* phase;      % 带 chirp 相位的前缀
+    out(:,k) = [prefix; blk];
 end
-s_tx = out(:);
+
+s_tx = out(:); % 按列展开为列向量发送
 end
 
 function S_blocks = cpp_remove(rx, N, Ncp, K)
